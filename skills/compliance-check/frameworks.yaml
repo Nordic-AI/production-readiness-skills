@@ -213,7 +213,7 @@ frameworks:
     key_controls:
       - right to know, delete, correct, opt out of sale/sharing, limit use of sensitive PI
       - honor Global Privacy Control signal
-      - "Do Not Sell or Share My Personal Information" link
+      - '"Do Not Sell or Share My Personal Information" link'
       - reasonable security
     references:
       - https://cppa.ca.gov/
