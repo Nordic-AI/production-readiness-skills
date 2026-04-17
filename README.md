@@ -37,19 +37,22 @@ mkdir -p .claude/skills
 cp -r /path/to/this/repo/skills/* .claude/skills/
 ```
 
-## The 9 skills
+## The 12 skills
 
 | Skill | Purpose |
 |---|---|
 | [`production-readiness`](skills/production-readiness/SKILL.md) | Orchestrator — scopes the project, then delegates to the relevant audit skills and aggregates findings. |
 | [`security-audit`](skills/security-audit/SKILL.md) | OWASP Top 10, authN/Z, secrets, input validation, crypto, session management, security headers. |
-| [`compliance-check`](skills/compliance-check/SKILL.md) | Jurisdiction discovery → GDPR / NIS2 / EU AI Act / DORA / HIPAA / CCPA / sector-specific controls. |
-| [`test-coverage`](skills/test-coverage/SKILL.md) | Enforces 90% line + branch coverage, demands integration and stress/load testing beyond unit tests. |
-| [`reliability-audit`](skills/reliability-audit/SKILL.md) | Error handling, retry + backoff, timeouts, idempotency, graceful degradation, transaction boundaries. |
-| [`observability-audit`](skills/observability-audit/SKILL.md) | Structured logging, RED/USE metrics, distributed tracing, alerting, runbooks. |
-| [`supply-chain-audit`](skills/supply-chain-audit/SKILL.md) | Dependency vulnerability scanning, SBOM, lockfile pinning, signature verification, base image hygiene. |
-| [`data-protection-audit`](skills/data-protection-audit/SKILL.md) | Encryption at rest / in transit, PII classification, retention, residency, key management, backups. |
-| [`scalability-review`](skills/scalability-review/SKILL.md) | Scope-aware review: DB indexing, N+1, caching, connection pooling, horizontal scaling, rate limiting. |
+| [`compliance-check`](skills/compliance-check/SKILL.md) | Jurisdiction discovery → GDPR / NIS2 / EU AI Act / DORA / PCI-DSS / HIPAA / CCPA / sector-specific controls. |
+| [`ai-readiness`](skills/ai-readiness/SKILL.md) | AI/ML review — EU AI Act classification, evals, prompt injection defenses, RAG quality + security, hallucination handling, output filtering, human oversight, fairness, agent safety. |
+| [`test-coverage`](skills/test-coverage/SKILL.md) | Enforces 90% line + branch coverage, demands integration, stress/load, and (where relevant) property-based tests. |
+| [`reliability-audit`](skills/reliability-audit/SKILL.md) | Error handling, retry + backoff + jitter, timeouts, idempotency, graceful degradation, transaction boundaries, circuit breakers. |
+| [`observability-audit`](skills/observability-audit/SKILL.md) | Structured logging, correlation IDs, RED/USE metrics, distributed tracing, alerting, runbooks. |
+| [`supply-chain-audit`](skills/supply-chain-audit/SKILL.md) | Dependency vulnerability scanning, SBOM, lockfile pinning, signature verification, base image hygiene, CI-actions pinning. |
+| [`data-protection-audit`](skills/data-protection-audit/SKILL.md) | Encryption at rest / in transit, PII classification + inventory, retention, residency, key management, backups. |
+| [`accessibility-audit`](skills/accessibility-audit/SKILL.md) | WCAG 2.2 AA + EU Accessibility Act — semantic HTML, keyboard, ARIA, contrast, screen-reader compatibility, forms. |
+| [`release-readiness`](skills/release-readiness/SKILL.md) | CI/CD quality, deployment strategy (rolling / blue-green / canary), rollback, migrations, feature flags, environment parity. |
+| [`scalability-review`](skills/scalability-review/SKILL.md) | Scope-aware review — DB indexing, N+1, caching, connection pooling, horizontal scaling, rate limiting, pagination. |
 
 ## How it works
 
@@ -62,18 +65,16 @@ Each audit skill is designed around four principles:
 
 ## Output format
 
-Every audit skill emits findings in this shape:
+All findings conform to a shared JSON Schema at [`schemas/finding.schema.json`](schemas/finding.schema.json). Minimum shape:
 
 ```yaml
-finding:
-  id: SEC-001
-  skill: security-audit
+- id: SEC-001
   severity: critical | high | medium | low | info
   category: authentication
   title: "JWT signature verification disabled"
   location: "src/auth/middleware.ts:42"
   description: >
-    <what>, <why it matters>, <what attacker/regulator would do with this>
+    <what>, <why it matters>, <what attacker / regulator would do with this>
   evidence:
     - code snippet
     - GitNexus impact (optional)
@@ -82,26 +83,46 @@ finding:
     edit_mode: <diff or patch to apply>
   references:
     - <OWASP / CWE / regulation / RFC>
-  blocker_at_tier: [team, scalable]    # which scope tiers treat this as blocking
+  blocker_at_tier: [team, scalable]
 ```
 
-The orchestrator aggregates all findings into a single report with a top-level go / no-go per scope tier.
+Each skill owns a finding ID prefix (`SEC`, `COMP`, `AI`, `A11Y`, `REL-R`, etc.) so findings stay attributable across the aggregate report. The orchestrator dedupes cross-skill overlaps and produces a single go / no-go verdict per scope tier.
 
 ## Scope tiers
 
-| Tier | Description | Default thresholds |
+| Tier | Description | Default blocking threshold |
 |---|---|---|
-| `prototype` | Pre-PMF, internal-only, no real user data. | Critical findings blocking only. Test coverage advisory. |
-| `team` | Production with real users, single team owns it. | All high+ findings blocking. 90% coverage required. |
-| `scalable` | Multi-team, high availability, regulated / payment-critical. | All medium+ findings blocking. 90% coverage + stress tests + runbooks required. |
+| `prototype` | Pre-PMF, internal-only, no real user data. | `critical` only. |
+| `team` | Production with real users, single team owns it. | `critical` + `high`. 90% coverage required. |
+| `scalable` | Multi-team, high availability, regulated / payment-critical. | `critical` + `high` + `medium`. 90% coverage + stress tests + runbooks required. |
 
-Tiers are set during orchestrator scoping or can be passed explicitly: `/production-readiness --tier=scalable`.
+Tiers are set during orchestrator scoping or passed explicitly: `/production-readiness --tier=scalable`.
+
+## Repository layout
+
+```
+.
+├── skills/                 # the skills themselves, one directory each
+├── docs/
+│   ├── CONVENTIONS.md      # library-wide rules: mode, severity, schema, remediation, do-nots
+│   └── skill-template.md   # starting point for new skills
+├── schemas/
+│   └── finding.schema.json # JSON Schema every finding must satisfy
+├── scripts/
+│   └── validate_skills.py  # frontmatter + example-finding validator
+└── .github/workflows/      # CI — validator + markdownlint + yamllint
+```
 
 ## Contributing
 
-Contributions welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) (TBD).
+PRs welcome. Read [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`docs/CONVENTIONS.md`](docs/CONVENTIONS.md) first. Run the validator locally before opening a PR:
 
-When adding or modifying a skill, keep the four design principles above intact, and ensure the `description` in frontmatter accurately reflects when the skill should be routed to.
+```bash
+pip install pyyaml jsonschema
+python scripts/validate_skills.py
+```
+
+When authoring a new skill, copy the template from [`docs/skill-template.md`](docs/skill-template.md), claim a unique finding ID prefix in `docs/CONVENTIONS.md` §4 and in the skill's `metadata.id_prefix` frontmatter field, and include at least 3 worked example findings.
 
 ## License
 
@@ -109,4 +130,4 @@ Apache License 2.0 — see [LICENSE](LICENSE).
 
 ## Authors
 
-[Nordic AI](https://github.com/nordic-ai)
+[Nordic AI](https://github.com/Nordic-AI)

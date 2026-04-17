@@ -1,6 +1,10 @@
 ---
 name: reliability-audit
 description: Reviews an application's reliability posture — error handling, retries with backoff and jitter, timeouts, idempotency, circuit breakers, graceful degradation, transaction boundaries, and failure isolation. Use when the user asks about "reliability", "error handling", "resilience", "retries", "timeouts", "graceful degradation", invokes /reliability-audit, or when the orchestrator delegates. Stack-agnostic, mode-aware, scope-tier-aware.
+license: Apache-2.0
+metadata:
+  version: 0.1.0
+  id_prefix: REL
 ---
 
 # Reliability Audit
@@ -199,6 +203,128 @@ Top 3 SPOFs / fragility sources:
   1. ...
 Dependency inventory (external I/O):
   - <service>: timeout <value>, retries <yes/no>, circuit breaker <yes/no>
+```
+
+## Example findings
+
+### Example 1 — HTTP client without timeout
+
+```yaml
+- id: REL-004
+  severity: critical
+  category: timeouts
+  title: "Outbound calls to payments provider have no timeout"
+  location: "src/integrations/payments.ts:12"
+  description: |
+    The Axios client used to call the payments provider is constructed
+    without a `timeout` option. Axios defaults to no timeout — a slow
+    or unresponsive upstream hangs the request thread indefinitely.
+    Under a provider slowdown, upstream HTTP workers fill up and the
+    entire checkout path becomes unavailable even for requests that
+    wouldn't normally touch payments (connection pool exhaustion). This
+    is the canonical "small upstream blip → full outage" pattern.
+  evidence:
+    - |
+      // src/integrations/payments.ts:12
+      const client = axios.create({
+        baseURL: config.payments.url,
+        headers: { Authorization: `Bearer ${config.payments.key}` },
+        // no timeout
+      });
+  remediation:
+    plan_mode: |
+      Set a conservative end-to-end timeout (e.g. 5s for checkout,
+      tighter for status queries). Also add a separate connection
+      timeout and socket timeout where library supports it. Fail fast
+      rather than holding threads.
+    edit_mode: |
+      Safe: add `timeout: 5000` to the axios.create call; add a test
+      asserting a slow upstream causes the client to reject within the
+      window.
+  references:
+    - "Release It! — Michael Nygard, 'Integration Points'"
+  blocker_at_tier: [prototype, team, scalable]
+```
+
+### Example 2 — Retries without backoff or jitter
+
+```yaml
+- id: REL-011
+  severity: high
+  category: retries
+  title: "Retry loop fixed-delay 500ms, 10 attempts — produces retry storms"
+  location: "src/lib/fetch_with_retry.js:24"
+  description: |
+    The shared fetch wrapper retries 10 times with a fixed 500ms delay
+    on any network error or 5xx. Under a real upstream outage every
+    caller retries in lockstep 10 times, multiplying the load the
+    upstream sees by 10x exactly when it's least able to handle it
+    (thundering herd). The outage extends; recovery is slower. The
+    correct pattern is exponential backoff with jitter and a sensible
+    attempt cap (typically 3-5).
+  evidence:
+    - |
+      // src/lib/fetch_with_retry.js:24
+      for (let i = 0; i < 10; i++) {
+        try { return await fetch(url, opts); }
+        catch (e) { await sleep(500); }
+      }
+  remediation:
+    plan_mode: |
+      1. Use a retry library with exponential backoff + full jitter
+         (e.g. `p-retry` for Node, `tenacity` for Python, `resilience4j`
+         for JVM, `backoff` for Go).
+      2. Cap attempts at 3-5.
+      3. Retry only on retryable conditions (network, 429, 502, 503,
+         504). Do not retry 400/401/403/404.
+      4. Consider a global retry budget at scalable tier.
+    edit_mode: |
+      Safe in principle but affects retry semantics across all callers.
+      Confirm before applying — downstream services will see fewer
+      retry bursts, which some implicit consumers may rely on.
+  references:
+    - "AWS Architecture Blog — Exponential Backoff and Jitter"
+  blocker_at_tier: [team, scalable]
+```
+
+### Example 3 — Non-idempotent write endpoint without an idempotency key
+
+```yaml
+- id: REL-019
+  severity: high
+  category: idempotency
+  title: "POST /transfers creates duplicate transfers on client retry"
+  location: "src/routes/transfers.ts:33"
+  description: |
+    The transfer endpoint is a POST that directly inserts a transfer
+    row and calls the payments API. It accepts no Idempotency-Key
+    header and does not dedupe by any stable key. When a client
+    retries (browser, mobile flaky network, proxy timeout) the request
+    creates a second transfer. Support logs show 0.3% of transfers in
+    March were duplicates refunded after customer complaints — the
+    user-visible pain corresponds to an invisible reliability bug.
+  evidence:
+    - |
+      // src/routes/transfers.ts:33
+      router.post('/transfers', async (req, res) => {
+        const transfer = await db.transfers.insert(req.body);
+        await payments.debit(transfer);
+        res.json(transfer);
+      });
+  remediation:
+    plan_mode: |
+      1. Require an `Idempotency-Key` header on transfer POSTs.
+      2. Store (key, user_id, request_hash, response) in a separate
+         table with a TTL (e.g. 24h). On replay with matching key +
+         request, return the stored response. On matching key +
+         different request, return 409.
+      3. Update client SDKs and docs to require the header.
+    edit_mode: |
+      Multi-step; requires confirmation. Migration adds the idempotency
+      table; middleware applies pre-existing response replay logic.
+  references:
+    - "Stripe — Idempotent requests (stripe.com/docs/api/idempotent_requests)"
+  blocker_at_tier: [team, scalable]
 ```
 
 ## Edit-mode remediation

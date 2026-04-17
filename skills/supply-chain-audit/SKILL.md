@@ -1,6 +1,10 @@
 ---
 name: supply-chain-audit
 description: Reviews software supply chain security — dependency vulnerabilities, lockfile pinning, SBOM generation, build reproducibility, base image hygiene, commit signing, secret scanning in history, and CI/CD pipeline integrity. Use when the user asks about "supply chain", "dependencies", "SBOM", "vulnerabilities", "CVEs", "dependency security", invokes /supply-chain-audit, or when the orchestrator delegates. Stack-agnostic, mode-aware, scope-tier-aware.
+license: Apache-2.0
+metadata:
+  version: 0.1.0
+  id_prefix: SUPP
 ---
 
 # Supply Chain Audit
@@ -203,6 +207,116 @@ Unpinned third-party actions: <count>
 SBOM: <generated? format?>
 Top 3 supply-chain risks:
   1. ...
+```
+
+## Example findings
+
+### Example 1 — Third-party GitHub Action pinned by tag
+
+```yaml
+- id: SUPP-003
+  severity: high
+  category: ci-cd
+  title: "12 third-party GitHub Actions pinned by tag, vulnerable to tag hijack"
+  location: ".github/workflows/*.yml"
+  description: |
+    Workflows reference third-party actions by mutable tag
+    (`actions/checkout@v4`, `actions/setup-node@v4`,
+    `some-vendor/deploy@main`). If the action's repo is compromised or
+    the tag is re-pointed, every subsequent CI run executes attacker
+    code with the repo's secrets in scope. The classic
+    tj-actions/changed-files precedent and multiple Codecov-style
+    incidents show tag-pinning is insufficient. GitHub recommends
+    pinning third-party actions by full SHA.
+  evidence:
+    - ".github/workflows/ci.yml:14: uses: actions/checkout@v4"
+    - ".github/workflows/release.yml:28: uses: some-vendor/deploy@main"
+  remediation:
+    plan_mode: |
+      Pin every third-party action to its current commit SHA, with the
+      human-readable tag as a trailing comment, e.g.
+      `uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1`.
+      Adopt a bot (dependabot or renovate) to propose SHA updates
+      alongside tag moves. Skip for GitHub-owned `actions/*` if policy
+      allows — but most orgs include them anyway.
+    edit_mode: |
+      Safe. Script lookup of current SHAs per action + apply across
+      workflows. Run a workflow after pinning to confirm identical
+      behavior.
+  references:
+    - "GitHub docs — Security hardening for GitHub Actions"
+    - "OpenSSF Scorecard — Pinned-Dependencies"
+  blocker_at_tier: [team, scalable]
+```
+
+### Example 2 — Docker base image pinned by mutable tag
+
+```yaml
+- id: SUPP-009
+  severity: medium
+  category: container
+  title: "Dockerfile uses node:20-alpine — digest not pinned"
+  location: "Dockerfile:1"
+  description: |
+    `FROM node:20-alpine` pulls the current tag every build.
+    Registry-side the tag moves roughly weekly, which changes both
+    behavior and attack surface without a code change. Reproducible
+    builds require digest pinning. A further concern: image scans
+    done last week no longer apply to images built tomorrow.
+  evidence:
+    - |
+      # Dockerfile:1
+      FROM node:20-alpine
+  remediation:
+    plan_mode: |
+      1. Replace with `FROM node:20-alpine@sha256:<digest>` — look up
+         current digest via `docker buildx imagetools inspect`.
+      2. Automate refresh via renovate with a `docker` manager that
+         PRs digest updates alongside announcements.
+      3. Re-scan (Trivy) on every digest update.
+    edit_mode: |
+      Safe. Apply with current digest; rebuild and confirm image
+      boots.
+  references:
+    - "SLSA L3 — Hermetic, reproducible builds"
+  blocker_at_tier: [team, scalable]
+```
+
+### Example 3 — Known critical CVE in production dependency
+
+```yaml
+- id: SUPP-017
+  severity: critical
+  category: vulnerabilities
+  title: "lodash 4.17.15 — CVE-2021-23337 (command injection) in production dep"
+  location: "package-lock.json"
+  description: |
+    `lodash` is a direct dependency at 4.17.15, affected by
+    CVE-2021-23337 (command injection via the `template` function).
+    The app's `src/notifications/templates.ts` does pass user content
+    through `_.template` with a restricted allowlist, but the
+    allowlist is incomplete. Even if the current call site is safe,
+    leaving a direct lodash below the patch threshold means any
+    future call could become a vector without review catching it.
+  evidence:
+    - "package-lock.json — lodash 4.17.15"
+    - "npm audit → 'High — Command Injection in lodash' (advisory GHSA-35jh-r3h4-6jhm)"
+    - "src/notifications/templates.ts:22 uses _.template on user-derived template strings"
+  remediation:
+    plan_mode: |
+      1. Upgrade lodash to 4.17.21+ (minor upgrade, mostly
+         backward-compatible).
+      2. Add a regression test covering the template-rendering path.
+      3. Configure CI to fail on new high/critical vulns (`npm audit
+         --audit-level=high`) and wire Dependabot grouped PRs.
+    edit_mode: |
+      Safe. Bump via `npm update lodash`; review `npm ls lodash` to
+      ensure no resolver stuck on old version.
+  references:
+    - "GHSA-35jh-r3h4-6jhm"
+    - "CVE-2021-23337"
+  cve_ids: [CVE-2021-23337]
+  blocker_at_tier: [prototype, team, scalable]
 ```
 
 ## Edit-mode remediation

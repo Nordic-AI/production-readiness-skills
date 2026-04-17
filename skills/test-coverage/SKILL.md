@@ -1,6 +1,10 @@
 ---
 name: test-coverage
 description: Enforces a 90% line and branch coverage threshold and audits for meaningful integration, end-to-end, stress, and property-based tests beyond unit tests. Identifies critical paths that lack coverage, flags tests that pass without asserting, and in edit mode generates missing test scaffolds. Use when the user asks to "check test coverage", "audit tests", "are we tested enough", "add tests", invokes /test-coverage, or when the orchestrator delegates. Stack-agnostic, mode-aware, scope-tier-aware.
+license: Apache-2.0
+metadata:
+  version: 0.1.0
+  id_prefix: TEST
 ---
 
 # Test Coverage Audit
@@ -186,6 +190,115 @@ Critical paths without tests: <N>
 Top 3 gaps:
   1. <id> — <title>
   2. ...
+```
+
+## Example findings
+
+### Example 1 — Critical path has zero tests
+
+```yaml
+- id: TEST-002
+  severity: critical
+  category: critical-path
+  title: "Checkout flow (POST /api/checkout) has no tests"
+  location: "src/routes/checkout.ts — not covered by any test file"
+  description: |
+    The checkout handler performs the most business-critical action
+    (payment + order creation + inventory decrement + email) and has
+    zero test coverage. A regression here is invisible until a customer
+    reports it. Looking at git history, this handler has been modified
+    14 times in the last 6 months — each modification relied on
+    reviewer inspection alone. On a team-tier production service,
+    the absence of tests here is the single highest-impact gap in the
+    suite.
+  evidence:
+    - "No file matches test/integration/checkout*.test.ts or similar."
+    - "Coverage report (latest nightly) shows src/routes/checkout.ts at 0%."
+  remediation:
+    plan_mode: |
+      Add integration tests against a test DB + stubbed payment
+      provider: (a) happy path completes order + decrements stock, (b)
+      insufficient stock returns 409 without charge, (c) payment failure
+      does not create order or decrement stock, (d) duplicate idempotency
+      key returns prior response, (e) user not authorized returns 401.
+    edit_mode: |
+      Scaffold `tests/integration/checkout.test.ts` with the 5 cases
+      above. Confirm test-DB setup + payment-provider test mode keys
+      before applying.
+  references:
+    - "Testing Pyramid (Mike Cohn, 2009)"
+  blocker_at_tier: [team, scalable]
+```
+
+### Example 2 — Integration tests mock the database
+
+```yaml
+- id: TEST-009
+  severity: high
+  category: mocking
+  title: "Integration test suite mocks the DB, defeating the point of integration tests"
+  location: "tests/integration/users.test.ts:12"
+  description: |
+    `tests/integration/users.test.ts` sets up the module with
+    `jest.mock('../../src/db')`, replacing the entire database layer
+    with in-memory stubs. The test name and directory imply integration
+    testing, but by mocking the very layer that integration tests
+    should exercise, the suite provides false confidence — it proves
+    the function calls its mock correctly, not that it works against
+    Postgres. Known SQL errors (constraint violations, serialization
+    failures, null handling) go undetected.
+  evidence:
+    - |
+      // tests/integration/users.test.ts:12
+      jest.mock('../../src/db');
+  remediation:
+    plan_mode: |
+      1. Keep unit tests mocked; convert this file to true integration
+         using testcontainers (or an existing docker-compose Postgres).
+      2. Run the suite against a fresh DB state per test (transaction
+         rollback or schema reset).
+      3. Move any tests that genuinely benefit from DB mocking back to
+         the unit-test tier and rename accordingly.
+    edit_mode: |
+      Multi-file change. Proposes setup helper using `@testcontainers`
+      and rewrites each test with real queries. Requires confirmation.
+  references:
+    - "Martin Fowler — Integration Test"
+  blocker_at_tier: [team, scalable]
+```
+
+### Example 3 — 34 tests skipped without tracking
+
+```yaml
+- id: TEST-018
+  severity: medium
+  category: assertions
+  title: "34 tests use .skip / xit / test.skip with no ticket or timeline"
+  location: "multiple"
+  description: |
+    A repo-wide grep finds 34 instances of `.skip`, `xit`, `test.skip`,
+    or `@Disabled` across the test tree. None reference a ticket or a
+    deadline. Skipped tests are quiet signals of regression or
+    abandoned features; accumulating them reduces the suite's value
+    and lulls the team into assuming "tests pass" means "code works".
+    Sample inspection shows at least 8 are for functionality that was
+    removed — dead tests. Another 12 are flaky-test band-aids.
+  evidence:
+    - "grep -rn '\\.skip\\|xit\\|test.skip' tests/ | wc -l → 34"
+    - "tests/integration/payments.test.ts:45 — `.skip` since 2025-09, no ticket"
+  remediation:
+    plan_mode: |
+      1. Triage: delete tests for removed features; file tickets for
+         flaky ones with a deadline; un-skip ones that turn out to pass.
+      2. Add an ESLint rule (`no-only-tests`, `jest/no-disabled-tests`)
+         that fails CI on new `.skip` without an attached comment
+         pointing to a ticket.
+    edit_mode: |
+      Safe. Adds ESLint config + a follow-up issue per remaining
+      skipped test.
+  references:
+    - "Working Effectively with Unit Tests (Fields)"
+  blocker_at_tier: [team, scalable]
 ```
 
 ## Edit-mode remediation

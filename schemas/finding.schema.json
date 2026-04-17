@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Nordic-AI/production-readiness-skills/schemas/finding.schema.json",
+  "title": "Production Readiness Finding",
+  "description": "Schema for a single finding emitted by any skill in the Nordic AI production-readiness library. See docs/CONVENTIONS.md for semantic rules.",
+  "type": "object",
+  "required": ["id", "severity", "category", "title", "description", "blocker_at_tier"],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^(SEC|COMP|TEST|REL|OBS|SUPP|DATA|SCALE|AI|A11Y|REL-R|ORCH)-[0-9]{3,4}$",
+      "description": "Unique identifier. Prefix matches the emitting skill (see CONVENTIONS.md §4)."
+    },
+    "severity": {
+      "type": "string",
+      "enum": ["critical", "high", "medium", "low", "info"],
+      "description": "Universal severity scale (see CONVENTIONS.md §2)."
+    },
+    "category": {
+      "type": "string",
+      "minLength": 2,
+      "description": "Skill-specific category. Each skill defines its own enum in its SKILL.md."
+    },
+    "title": {
+      "type": "string",
+      "minLength": 10,
+      "maxLength": 140,
+      "description": "Short imperative phrase describing the finding."
+    },
+    "description": {
+      "type": "string",
+      "minLength": 50,
+      "description": "What the gap is, why it matters, realistic exploitation / failure / enforcement scenario."
+    },
+    "location": {
+      "oneOf": [
+        {
+          "type": "string",
+          "description": "File:line, 'process-level', 'system-level', or 'multiple'."
+        },
+        {
+          "type": "array",
+          "items": { "type": "string" },
+          "minItems": 1
+        }
+      ]
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "description": "Code snippets, config, tool output, or GitNexus query results supporting the finding."
+    },
+    "remediation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "plan_mode": {
+          "type": "string",
+          "description": "Concrete steps to fix, described (no edits made)."
+        },
+        "edit_mode": {
+          "type": "string",
+          "description": "Diff, patch, or command sequence applicable in edit mode."
+        }
+      }
+    },
+    "references": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "OWASP ASVS sections, CWE IDs, regulation articles, RFCs, vendor docs."
+    },
+    "blocker_at_tier": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": ["prototype", "team", "scalable"]
+      },
+      "uniqueItems": true,
+      "description": "Scope tiers at which this finding blocks launch. Empty array = advisory at all tiers."
+    },
+    "related_findings": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^(SEC|COMP|TEST|REL|OBS|SUPP|DATA|SCALE|AI|A11Y|REL-R|ORCH)-[0-9]{3,4}$"
+      },
+      "uniqueItems": true,
+      "description": "IDs of related findings from other skills — used by the orchestrator for cross-skill dedup."
+    },
+    "framework": {
+      "type": "string",
+      "description": "Regulatory framework (compliance-check only). E.g. GDPR, NIS2, EU_AI_ACT, PCI_DSS, HIPAA."
+    },
+    "article": {
+      "type": "string",
+      "description": "Specific article / section / requirement (compliance-check only). E.g. 'Art. 17', '§164.312(a)', 'Req. 3.4'."
+    },
+    "cve_ids": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^CVE-[0-9]{4}-[0-9]{4,}$"
+      },
+      "description": "CVE identifiers (supply-chain-audit only)."
+    },
+    "data_classes_affected": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Data classes impacted (data-protection-audit only). E.g. 'email', 'health_record', 'payment'."
+    },
+    "expected_impact": {
+      "type": "string",
+      "description": "Quantitative or qualitative expected impact of remediation (scalability-review only)."
+    },
+    "wcag_success_criterion": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$",
+      "description": "WCAG 2.x success criterion identifier (accessibility-audit only). E.g. '1.4.3'."
+    }
+  }
+}

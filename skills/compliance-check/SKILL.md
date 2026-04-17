@@ -1,6 +1,10 @@
 ---
 name: compliance-check
 description: Regulatory and legal compliance audit. Discovers which frameworks apply based on jurisdiction, industry, and data types, then checks the codebase against the applicable controls. EU-first (GDPR, NIS2, EU AI Act, DORA) with support for UK, US federal and state laws, sector-specific regimes (HIPAA, PCI-DSS, SOC 2, ISO 27001), and emerging AI regulation. Use when the user asks about GDPR, compliance, regulation, data protection law, audit readiness, invokes /compliance-check, or when the orchestrator delegates. Mode-aware and scope-tier-aware.
+license: Apache-2.0
+metadata:
+  version: 0.1.0
+  id_prefix: COMP
 ---
 
 # Compliance Check
@@ -242,6 +246,136 @@ Process-level gaps requiring org-level action:
   - <list>
 Not assessed (out of scope or insufficient info):
   - <list>
+```
+
+## Example findings
+
+### Example 1 — GDPR right to erasure not implemented
+
+```yaml
+- id: COMP-001
+  severity: critical
+  framework: GDPR
+  article: "Art. 17"
+  category: data-subject-rights
+  title: "No endpoint or process exists to action a user's erasure request"
+  location: "system-level"
+  description: |
+    GDPR Art. 17 requires controllers to erase personal data without
+    undue delay on request from the data subject (subject to the
+    exemptions in Art. 17(3)). No /account/delete endpoint, no admin
+    tooling, and no support runbook exists for this. "Delete account" in
+    the UI sets `users.is_active=false` but does not erase data, and
+    derived stores (analytics warehouse, email service, ML feature
+    store) are never informed. Supervisory authorities have issued
+    multiple multi-million EUR fines for precisely this pattern; on
+    enforcement, this is an immediate critical.
+  evidence:
+    - "grep for /delete|/erase|/forget returns nothing across routes."
+    - "`users.is_active=false` soft-delete does not propagate to email, analytics, or warehouse."
+  remediation:
+    plan_mode: |
+      1. Scaffold an erasure endpoint accessible via authenticated user
+         flow + admin tooling. Define per-store deletion procedure
+         (primary DB, caches, search index, warehouse, email,
+         analytics, backups via crypto-shredding or retention window).
+      2. Add a job that propagates erasure to sub-processors (Stripe,
+         SendGrid, etc.) via their erasure APIs.
+      3. Document the process as part of your Record of Processing.
+    edit_mode: |
+      Requires confirmation and legal review. Deletion is irreversible;
+      ensure lawful retention exceptions (e.g. tax records) are encoded
+      before deployment.
+  references:
+    - "Regulation (EU) 2016/679, Art. 17"
+    - "EDPB Guidelines 05/2020 on consent, §§138-141 (erasure after consent withdrawal)"
+  related_findings: [DATA-003]
+  blocker_at_tier: [prototype, team, scalable]
+```
+
+### Example 2 — PAN stored post-authorization in violation of PCI-DSS
+
+```yaml
+- id: COMP-007
+  severity: critical
+  framework: PCI_DSS
+  article: "Req. 3.3.1"
+  category: payment-data
+  title: "Cardholder PAN persisted after authorization in the payments table"
+  location: "src/payments/charge.ts:66; db/migrations/0015_payments.sql"
+  description: |
+    The `payments.card_number` column stores the full Primary Account
+    Number (PAN) returned by the payment gateway's "charge" response,
+    not a token. PCI-DSS 4.0 Req. 3.3.1 prohibits storing sensitive
+    authentication data after authorization, and Req. 3.5 requires PAN
+    storage to be protected with strong cryptography. Direct PAN
+    storage vastly increases PCI scope (the whole app, DB, backups,
+    logs are in scope) and is an assessor's finding on day one.
+  evidence:
+    - |
+      -- db/migrations/0015_payments.sql
+      CREATE TABLE payments (
+        id BIGSERIAL PRIMARY KEY,
+        card_number VARCHAR(19),        -- stores full PAN
+        card_exp DATE,
+        ...
+      );
+  remediation:
+    plan_mode: |
+      1. Integrate with the gateway's tokenization (Stripe PaymentMethod
+         IDs, Adyen tokens, Braintree nonces). Store only the token and
+         the last 4 digits for display.
+      2. Migrate existing rows: ask the gateway to re-tokenize
+         historical cards where possible; cryptographically shred the
+         PAN column afterwards.
+      3. Update PCI scope documentation to reflect the reduced surface.
+    edit_mode: |
+      Multi-release migration. Requires confirmation and coordination
+      with the payments provider + your QSA.
+  references:
+    - "PCI-DSS v4.0 Req. 3.2.1, 3.3.1, 3.5"
+  related_findings: [DATA-009, SEC-033]
+  blocker_at_tier: [prototype, team, scalable]
+```
+
+### Example 3 — Record of Processing Activities missing
+
+```yaml
+- id: COMP-015
+  severity: high
+  framework: GDPR
+  article: "Art. 30"
+  category: record-of-processing
+  title: "No Record of Processing Activities (RoPA) maintained"
+  location: "process-level"
+  description: |
+    GDPR Art. 30 requires controllers (unless <250 employees AND
+    processing is occasional AND no special categories AND no risk to
+    rights) to maintain a written record of processing activities —
+    purposes, categories, recipients, transfers, retention, security
+    measures. No such document exists in the repo, SharePoint, or
+    project docs surveyed. Supervisory authorities routinely request
+    RoPA during investigations; absence is itself a finding.
+  evidence:
+    - "No `docs/ropa*`, `docs/privacy*`, or equivalent file."
+    - "Sub-processor list not maintained (SendGrid, Stripe, Datadog, Mixpanel detected in deps)."
+  remediation:
+    plan_mode: |
+      1. Populate a RoPA — the EDPB template is sufficient starting
+         point.
+      2. Per processing activity: document lawful basis, data subjects,
+         data categories, recipients (including sub-processors),
+         international transfers and their basis, retention period,
+         security measures.
+      3. Assign an owner; review annually or on material change.
+    edit_mode: |
+      Scaffold `docs/ropa-template.md` pre-filled with inferred
+      processing activities from the code. Do not claim completeness —
+      requires human / DPO review before publication.
+  references:
+    - "Regulation (EU) 2016/679, Art. 30"
+    - "EDPB Article 30 guidance"
+  blocker_at_tier: [team, scalable]
 ```
 
 ## Edit-mode remediation

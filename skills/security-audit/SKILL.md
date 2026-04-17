@@ -1,27 +1,25 @@
 ---
 name: security-audit
 description: Comprehensive application security audit covering OWASP Top 10, authentication, authorization, secret handling, input validation, cryptography, session management, CORS, CSP, security headers, and common injection vectors. Use when the user asks to "audit security", "review auth", "check for vulnerabilities", "run a security review", invokes /security-audit, or when the production-readiness orchestrator delegates. Stack-agnostic, mode-aware (audit-only in plan mode, remediates in edit mode), and scope-tier-aware.
+license: Apache-2.0
+metadata:
+  version: 0.1.0
+  id_prefix: SEC
 ---
 
 # Security Audit
 
-You are a defensive security reviewer. Your job is to find security gaps in the target application and, in edit mode, remediate them. Work from threat models outward: *who is the attacker, what are they trying to reach, what's stopping them*.
+You are a defensive security reviewer. Work from threat models outward: *who is the attacker, what are they trying to reach, what's stopping them*. Your job is to find security gaps and, in edit mode, remediate them.
+
+This skill follows the library-wide rules in [`docs/CONVENTIONS.md`](../../docs/CONVENTIONS.md) — mode handling, severity, output schema, remediation discipline, GitNexus usage, universal do-nots. This file documents what's specific to the security dimension.
+
+## Finding ID prefix
+
+`SEC` — see `CONVENTIONS.md` §4.
 
 ## Inputs
 
-When invoked by the orchestrator, you receive:
-- `scope_tier`: prototype | team | scalable
-- `jurisdiction`: e.g. EU, US-CA, UK
-- `data_sensitivity`: PII, payment, health, children's, biometric, none
-- `stack_summary`: language(s), framework(s), deploy target
-- `gitnexus_indexed`: true | false
-
-When invoked directly, gather these yourself by asking or reading the repo.
-
-## Mode detection
-
-- **Plan mode** — produce audit report only, with described remediations.
-- **Edit mode** — produce report, then offer to apply remediations. Per-change confirmation for: auth flow changes, crypto changes, anything that rotates secrets, anything that changes trust boundaries.
+From orchestrator: `scope_tier`, `jurisdiction`, `data_sensitivity`, `stack_summary`, `gitnexus_indexed`. When invoked directly, gather via scoping questions.
 
 ## Review surface
 
@@ -188,6 +186,120 @@ Top 3 risks:
   2. <id> — <title>
   3. <id> — <title>
 Not assessed: <categories skipped and why>
+```
+
+## Example findings
+
+### Example 1 — Password storage with MD5
+
+```yaml
+- id: SEC-001
+  severity: critical
+  category: authentication
+  title: "Passwords stored with unsalted MD5 — trivially reversible via rainbow tables"
+  location: "src/auth/user.py:88"
+  description: |
+    `hash_password` calls `hashlib.md5(password.encode()).hexdigest()` and
+    stores the result in `users.password_hash`. MD5 is cryptographically
+    broken for password storage: a 12-character alphanumeric password is
+    recoverable in seconds against modern GPUs, and unsalted MD5 means
+    precomputed rainbow tables reverse the top 10M passwords instantly.
+    Every user's password must be considered compromised and rotated the
+    moment a DB dump is leaked.
+  evidence:
+    - |
+      # src/auth/user.py:88
+      def hash_password(password: str) -> str:
+          return hashlib.md5(password.encode()).hexdigest()
+  remediation:
+    plan_mode: |
+      Migrate to argon2id (preferred) or bcrypt via `argon2-cffi` or
+      `bcrypt`. Strategy: (1) on next login, re-hash with argon2 and
+      flag `needs_rotation=false`. (2) Invalidate all sessions and force
+      password reset for users who haven't logged in within N days.
+      (3) After migration window, drop the MD5 fallback.
+    edit_mode: |
+      Requires confirmation: this changes the auth flow, invalidates
+      sessions, and forces a reset campaign. Coordinate with ops.
+  references:
+    - "OWASP ASVS 2.4 — Credential storage"
+    - "NIST SP 800-63B §5.1.1.2"
+    - "CWE-916"
+  blocker_at_tier: [prototype, team, scalable]
+```
+
+### Example 2 — IDOR on order detail endpoint
+
+```yaml
+- id: SEC-014
+  severity: high
+  category: authorization
+  title: "GET /api/orders/:id returns any order without checking ownership"
+  location: "src/routes/orders.ts:42"
+  description: |
+    The handler fetches the order by id and returns it if found, without
+    verifying the requesting user owns (or is otherwise entitled to) it.
+    Order IDs are sequential integers, so an authenticated user can
+    enumerate /api/orders/1, /api/orders/2, ... and read every order in
+    the system — shipping addresses, prices, items, tax IDs.
+  evidence:
+    - |
+      // src/routes/orders.ts:42
+      app.get('/api/orders/:id', requireAuth, async (req, res) => {
+        const order = await db.orders.findByPk(req.params.id);
+        res.json(order);                  // no ownership check
+      });
+  remediation:
+    plan_mode: |
+      Add an ownership predicate: `WHERE id = :id AND user_id = :user_id`.
+      For admin/support access, add an explicit role gate that's
+      auditable. Additionally, switch order IDs from sequential integers
+      to ULIDs to reduce enumeration damage if the check regresses.
+    edit_mode: |
+      Safe diff: add `.where({ user_id: req.user.id })`. Apply similar
+      checks to all other :id-scoped endpoints in the same router.
+  references:
+    - "OWASP ASVS 4.1 — General access control"
+    - "OWASP API Security Top 10 2023 — API1 BOLA"
+    - "CWE-639"
+  blocker_at_tier: [team, scalable]
+```
+
+### Example 3 — JWT verification accepts `alg: none`
+
+```yaml
+- id: SEC-022
+  severity: critical
+  category: authentication
+  title: "JWT library accepts tokens signed with alg=none"
+  location: "src/middleware/auth.js:18"
+  description: |
+    The JWT verification call uses `jwt.verify(token, SECRET)` without
+    restricting accepted algorithms. Older versions of the library, and
+    several ports, default to accepting `alg: none` — an attacker can
+    forge tokens with arbitrary claims and a blank signature, bypassing
+    auth entirely. Even on versions that default to disallowing `none`,
+    not specifying `algorithms:` opt-in keeps the surface broad
+    (key-confusion attacks between HS256 and RS256 become possible).
+  evidence:
+    - |
+      // src/middleware/auth.js:18
+      const decoded = jwt.verify(token, SECRET);
+      // should be: jwt.verify(token, PUBLIC_KEY, { algorithms: ['RS256'] })
+  remediation:
+    plan_mode: |
+      1. Pass `{ algorithms: ['RS256'] }` (or the single algorithm in
+         actual use) to every jwt.verify call.
+      2. Upgrade jsonwebtoken to the latest version.
+      3. Add a test that asserts a token with alg=none is rejected.
+    edit_mode: |
+      Safe to apply. Adds algorithms allowlist and the corresponding
+      negative test. Confirm the allowlist matches the issuing library.
+  references:
+    - "OWASP JSON Web Token Cheat Sheet"
+    - "CVE-2015-9235 (historical but illustrative)"
+    - "RFC 7518 §3.6"
+  blocker_at_tier: [prototype, team, scalable]
 ```
 
 ## Edit-mode remediation

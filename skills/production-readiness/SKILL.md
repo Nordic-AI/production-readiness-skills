@@ -1,6 +1,10 @@
 ---
 name: production-readiness
 description: Orchestrates a full production-readiness review of an application. Use when the user asks "is this production-ready", "audit my app", "what's missing before we ship", "prepare this for launch", or when they invoke /production-readiness. Triages scope, jurisdiction, and stack, then delegates to the 8 specialist audit skills (security, compliance, test-coverage, reliability, observability, supply-chain, data-protection, scalability) and aggregates their findings into a single go / no-go report.
+license: Apache-2.0
+metadata:
+  version: 0.1.0
+  id_prefix: ORCH
 ---
 
 # Production Readiness Orchestrator
@@ -68,14 +72,19 @@ Produce a one-paragraph **Project context** summary before delegating. Include: 
 
 Invoke the specialist skills in this order (the order matters — later skills benefit from findings in earlier ones):
 
-1. **`security-audit`** — covers the broadest surface, often surfaces cross-cutting issues the other skills then contextualize.
-2. **`compliance-check`** — consumes the security findings to determine which are regulatory-blocking vs. merely technical-debt. Uses jurisdiction from scoping.
-3. **`data-protection-audit`** — overlaps with both security and compliance; runs after them so it can cross-reference and dedupe.
+1. **`security-audit`** — broadest surface; often surfaces cross-cutting issues the other skills then contextualize.
+2. **`compliance-check`** — consumes security findings to determine which are regulatory-blocking. Uses jurisdiction from scoping.
+3. **`data-protection-audit`** — overlaps with security + compliance; runs after so it can cross-reference and dedupe.
 4. **`supply-chain-audit`** — dependency and build-chain surface.
-5. **`test-coverage`** — enforces 90% line + branch and demands integration + stress/load tests appropriate to the scope tier.
-6. **`reliability-audit`** — error handling, retries, idempotency, timeouts.
-7. **`observability-audit`** — logging, metrics, tracing, alerting, runbooks.
-8. **`scalability-review`** — runs last because its thresholds are the most scope-tier-sensitive.
+5. **`ai-readiness`** — only if AI/ML components detected or declared. Runs after security + compliance so their findings feed in.
+6. **`test-coverage`** — enforces 90% line + branch and demands integration + stress/load tests appropriate to tier.
+7. **`reliability-audit`** — error handling, retries, idempotency, timeouts.
+8. **`observability-audit`** — logging, metrics, tracing, alerting, runbooks.
+9. **`accessibility-audit`** — only if application has a user interface. Feeds relevant findings (EAA scope) back to compliance.
+10. **`release-readiness`** — CI/CD pipeline, deployment, rollback, migrations. Runs late because it benefits from reliability + observability context.
+11. **`scalability-review`** — runs last; its thresholds are the most scope-tier-sensitive and it benefits from the full earlier picture.
+
+Skip any skill that is not applicable given the scoped project (e.g. skip `accessibility-audit` for a headless CLI; skip `ai-readiness` for a project with no AI components). Document the skip in the final report.
 
 For each specialist skill:
 
@@ -160,6 +169,97 @@ If in edit mode and the report contains fixable findings:
    - Deletion of existing code paths
    - Changes to CI / deployment config
    - Changes that affect >10 files
+
+## Example findings
+
+The orchestrator emits `ORCH-*` findings for orchestration-level issues — scope ambiguity, skill failures, stale analysis inputs. Specialist skills emit their own findings; those aren't duplicated here.
+
+### Example 1 — Scope tier ambiguous and user didn't answer
+
+```yaml
+- id: ORCH-001
+  severity: medium
+  category: scoping
+  title: "Scope tier could not be determined; defaulted to 'team' for the run"
+  location: "process-level"
+  description: |
+    The scoping prompt asked for a scope tier (prototype / team /
+    scalable). The user responded "it's complicated, use your
+    judgement". The repo has characteristics of both team-tier (real
+    users, real PII, production deploy) and scalable-tier
+    (multi-region infra, >5 services). I defaulted to 'team' for
+    blocking thresholds. Treat the report's go/no-go verdict as
+    conditional: findings labelled `scalable`-only are surfaced as
+    advisory rather than blocking. Re-run with an explicit tier for a
+    definitive verdict.
+  evidence:
+    - "User response to scoping prompt: 'use your judgement'."
+    - "README claims '99.95% uptime' (suggests scalable)."
+    - "Single engineering team per ORG chart (suggests team)."
+  remediation:
+    plan_mode: |
+      Ask product / engineering leadership to classify the service.
+      A durable tier definition (in CLAUDE.md or similar) prevents
+      re-ambiguity in future runs.
+  references: []
+  blocker_at_tier: []
+```
+
+### Example 2 — GitNexus index is stale; degraded analysis
+
+```yaml
+- id: ORCH-004
+  severity: low
+  category: analysis-input
+  title: "GitNexus repo index last updated 34 days ago; some specialist skills ran in degraded mode"
+  location: "process-level"
+  description: |
+    GitNexus was available but the repo's last index timestamp is
+    2026-03-15, before ~217 commits worth of structural change.
+    `security-audit` and `scalability-review` both noted they could
+    not use route_map / query results confidently — they fell back to
+    grep-based heuristics. Results are still valid, but expect more
+    false negatives than a fresh-index run would produce. Re-indexing
+    takes ~6 min on this repo.
+  evidence:
+    - "mcp__gitnexus__list_repos → last_indexed_at: 2026-03-15T09:22:11Z"
+    - "git rev-list --count ...HEAD since: 217 commits"
+  remediation:
+    plan_mode: |
+      Run `npx gitnexus analyze` on the repo, then re-invoke the
+      orchestrator for a refined report. CI integration that indexes
+      on every merge to main prevents drift.
+  references: []
+  blocker_at_tier: []
+```
+
+### Example 3 — Specialist skill returned no usable findings
+
+```yaml
+- id: ORCH-009
+  severity: high
+  category: skill-failure
+  title: "compliance-check exited without producing a finding set — dimension unassessed"
+  location: "process-level"
+  description: |
+    `compliance-check` was invoked but returned after the jurisdiction
+    discovery step without producing a finding list. Transcript
+    suggests the skill awaited user input on jurisdiction questions
+    that never came (the session was already non-interactive). The
+    rest of the run proceeded, but the aggregate report is missing
+    the compliance dimension entirely — dangerous to present as a
+    "complete" production-readiness report.
+  evidence:
+    - "Skill transcript shows 'Waiting on jurisdiction answers...' as last message."
+    - "No COMP-* findings in aggregator output."
+  remediation:
+    plan_mode: |
+      Re-invoke /compliance-check directly with jurisdiction +
+      industry + data sensitivity provided on the first message. Add
+      the compliance findings to the report.
+  references: []
+  blocker_at_tier: [team, scalable]
+```
 
 ## Scope-tier thresholds (reference)
 

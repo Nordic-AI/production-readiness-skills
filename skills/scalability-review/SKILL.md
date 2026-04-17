@@ -1,6 +1,10 @@
 ---
 name: scalability-review
 description: Scope-aware review of scalability and performance readiness — database indexing and query patterns, N+1 queries, caching strategy, connection pooling, horizontal scalability, statelessness, rate limiting, pagination, background job architecture, and expected-load headroom. Thresholds adapt sharply to the project's scope tier (prototype, team, scalable). Use when the user asks about "scalability", "performance", "will this scale", "horizontal scaling", "caching", invokes /scalability-review, or when the orchestrator delegates. Stack-agnostic, mode-aware.
+license: Apache-2.0
+metadata:
+  version: 0.1.0
+  id_prefix: SCALE
 ---
 
 # Scalability Review
@@ -256,6 +260,135 @@ N+1 detected: <count>
 Cacheable but uncached: <count>
 Paginated endpoints: <X/Y>
 Stateful components: <list>
+```
+
+## Example findings
+
+### Example 1 — N+1 on list endpoint
+
+```yaml
+- id: SCALE-003
+  severity: high
+  category: n-plus-1
+  title: "GET /api/projects fires N+1 queries loading owner per row"
+  location: "src/routes/projects.ts:19"
+  description: |
+    The handler fetches projects then iterates to resolve `owner` via a
+    separate lookup per row. Production logs show this endpoint issues
+    1 + N queries per request, where N averages 43 and peaks at 500+
+    for admin users. p99 latency of the endpoint is 1.4s in prod (SLO
+    is 400ms). The fix is trivial but the gap compounds as project
+    count grows — at scale, this endpoint is the single-largest source
+    of DB load.
+  evidence:
+    - |
+      // src/routes/projects.ts:19
+      const projects = await db.projects.findAll({ where: { org_id } });
+      for (const p of projects) {
+        p.owner = await db.users.findByPk(p.owner_id);
+      }
+    - "Postgres pg_stat_statements: top by calls is the user-by-pk query (SELECT from users WHERE id=$1), 18M calls/day."
+  remediation:
+    plan_mode: |
+      1. Use the ORM's eager-loading primitive:
+         `include: [{ model: User, as: 'owner' }]` (Sequelize),
+         `.preload(:owner)` (Ecto / Rails), `joinedload` / `selectinload`
+         (SQLAlchemy).
+      2. Add a test that asserts the endpoint issues bounded (≤2)
+         queries.
+      3. Audit sibling endpoints for the same pattern.
+    edit_mode: |
+      Safe. Diff adds eager-loading include + the query-count test.
+  references:
+    - "Martin Fowler — N+1 query problem"
+  expected_impact: "p99 1400ms → ~120ms; DB load on users reduced ~95%."
+  blocker_at_tier: [team, scalable]
+```
+
+### Example 2 — Missing FK index causes hot-query seq scan
+
+```yaml
+- id: SCALE-010
+  severity: high
+  category: db-index
+  title: "messages.conversation_id has no index — every thread fetch seq-scans"
+  location: "db/schema.sql:88"
+  description: |
+    `messages.conversation_id` has a foreign-key constraint but no
+    index. The thread-fetch query `SELECT ... FROM messages WHERE
+    conversation_id = $1 ORDER BY created_at DESC LIMIT 50` performs a
+    sequential scan on a 62M-row table. pg_stat_statements shows this
+    query contributing 22% of total DB time. An appropriate index
+    drops the query from ~300ms to ~2ms and vastly reduces cache
+    thrash.
+  evidence:
+    - |
+      -- db/schema.sql:88
+      CREATE TABLE messages (
+        id BIGSERIAL PRIMARY KEY,
+        conversation_id BIGINT NOT NULL REFERENCES conversations(id),
+        ...
+      );
+      -- no index on conversation_id
+    - "EXPLAIN ANALYZE shows Seq Scan on messages, Rows Removed by Filter: 61,998,112"
+  remediation:
+    plan_mode: |
+      1. `CREATE INDEX CONCURRENTLY idx_messages_conv_created ON
+         messages (conversation_id, created_at DESC);` — matches the
+         ORDER BY so it can serve sorted reads without a filesort.
+      2. Verify with EXPLAIN ANALYZE after build.
+      3. Add an ORM-level contract test to prevent regression on the
+         thread endpoint (query count / plan shape).
+    edit_mode: |
+      Safe on Postgres with CONCURRENTLY (no table lock). Confirm
+      before applying — builds may take 15+ min on a 62M-row table,
+      and CI that runs migrations on deploy must allow this window.
+  references:
+    - "Postgres — Multicolumn Indexes"
+  expected_impact: "Thread fetch p99 300ms → 2ms."
+  blocker_at_tier: [team, scalable]
+```
+
+### Example 3 — In-process session state prevents horizontal scaling
+
+```yaml
+- id: SCALE-022
+  severity: critical
+  category: stateless
+  title: "Sessions stored in process memory — cannot run >1 instance"
+  location: "src/auth/session.ts:8"
+  description: |
+    Sessions are held in a module-level `Map<string, Session>` in the
+    application process. Any attempt to run a second instance behind
+    a load balancer breaks authentication because sessions live on a
+    single pod. Current deployment is 1 replica — which is also a
+    single point of failure, and prevents scaling beyond a single
+    node's capacity. The limit is implicit and invisible in metrics
+    until the day the team tries to scale.
+  evidence:
+    - |
+      // src/auth/session.ts:8
+      const sessions = new Map<string, Session>();
+      export function getSession(id: string) { return sessions.get(id); }
+  remediation:
+    plan_mode: |
+      1. Move sessions to a shared store: Redis (fastest), DB
+         (simplest), or signed JWTs (stateless).
+      2. For Redis: use `ioredis` + a session library
+         (`connect-redis`, custom wrapper). TTL matches session
+         lifetime.
+      3. Keep a thin in-process LRU for read-through caching, write-
+         through invalidated on mutations.
+      4. Update the deployment to >1 replica + enable rolling.
+    edit_mode: |
+      Architectural change. Requires explicit confirmation +
+      coordination with ops for Redis provisioning + session
+      migration (users online at cutover lose their session unless a
+      dual-read strategy is used).
+  references:
+    - "Twelve-Factor App — VI. Processes"
+  expected_impact: "Enables horizontal scale + HA."
+  blocker_at_tier: [team, scalable]
 ```
 
 ## Edit-mode remediation

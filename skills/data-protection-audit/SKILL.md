@@ -1,6 +1,10 @@
 ---
 name: data-protection-audit
 description: Reviews how data is classified, stored, transmitted, retained, and destroyed. Covers encryption at rest and in transit, PII classification and inventory, retention and deletion policies, data residency, key management, backup integrity, and anonymization / pseudonymization. Use when the user asks about "data protection", "encryption", "PII", "data retention", "key management", "backups", invokes /data-protection-audit, or when the orchestrator delegates. Stack-agnostic, mode-aware, scope-tier-aware.
+license: Apache-2.0
+metadata:
+  version: 0.1.0
+  id_prefix: DATA
 ---
 
 # Data Protection Audit
@@ -227,6 +231,136 @@ Backup last tested restore: <date or unknown>
 
 Top 3 data-protection risks:
   1. ...
+```
+
+## Example findings
+
+### Example 1 — Production PII copied to developer laptops
+
+```yaml
+- id: DATA-002
+  severity: critical
+  category: access
+  title: "Developers sync prod DB dumps to local via `rake db:pull`"
+  location: "Rakefile:67; process-level"
+  description: |
+    The repo includes a `rake db:pull` task that snapshots the
+    production DB to the running developer's laptop for debugging.
+    Interviewed engineers confirmed it's used ~weekly. Production
+    `users` includes names, emails, phone numbers, and
+    government-issued ID fragments for ~300k users; `transactions`
+    includes payment metadata. This is a GDPR Art. 5 and Art. 32
+    finding (data minimization and security of processing
+    respectively), a PCI-DSS scope explosion (every developer laptop
+    is now in scope if payment data is touched), and a breach waiting
+    for a lost/stolen laptop.
+  evidence:
+    - |
+      # Rakefile:67
+      task :db_pull do
+        sh "pg_dump $PROD_URL > db/dev.sql"
+        sh "psql $DEV_URL < db/dev.sql"
+      end
+  remediation:
+    plan_mode: |
+      1. Remove the task. Replace with a synthetic-data generator or
+         a manually-anonymized staging snapshot pipeline (pg_anonymizer,
+         Tonic, or custom masking) that runs server-side and is never
+         copied to laptops.
+      2. Revoke prod DB credentials from developers; use Teleport /
+         JIT access for read-only diagnostic queries with audit.
+      3. Add a pre-commit hook to block commits that contain
+         high-entropy strings suggestive of prod data.
+    edit_mode: |
+      Delete the Rake task. Scaffold `scripts/synth_data.py` and
+      `db/anonymize.sql`. Requires confirmation and ops coordination
+      for credential revocation.
+  references:
+    - "Regulation (EU) 2016/679 Art. 5(1)(c), 32"
+  related_findings: [COMP-012]
+  blocker_at_tier: [team, scalable]
+```
+
+### Example 2 — Backups unencrypted
+
+```yaml
+- id: DATA-008
+  severity: high
+  category: backups
+  title: "Nightly DB backup stored in S3 bucket without server-side encryption"
+  location: "infra/terraform/backup.tf:22"
+  description: |
+    The backup bucket has no default encryption configured — objects
+    land unencrypted unless the client explicitly sets
+    `ServerSideEncryption`. The backup job uses `aws s3 cp` with no
+    SSE flag. Backups contain the full user + transactions tables.
+    AWS introduced default SSE in 2023, but Terraform older than that
+    with an explicit bucket config overrides it. Unencrypted backups
+    are a finding under GDPR Art. 32 and a clear regulatory gap for
+    HIPAA-covered or PCI-DSS-in-scope data.
+  evidence:
+    - |
+      # infra/terraform/backup.tf:22 — missing server_side_encryption block
+      resource "aws_s3_bucket" "backups" {
+        bucket = "acme-prod-backups"
+      }
+  remediation:
+    plan_mode: |
+      1. Add `aws_s3_bucket_server_side_encryption_configuration` to
+         force SSE-KMS (preferred) or SSE-S3 on every object.
+      2. Use a dedicated KMS key for backups (rotation enabled),
+         different from application-layer keys — enables crypto-
+         shredding without affecting live data.
+      3. Bucket policy denies unencrypted uploads.
+      4. Re-upload existing unencrypted objects to force encryption.
+    edit_mode: |
+      Safe with one caveat: a subsequent sweep job re-encrypts existing
+      objects (costs GB-transferred pricing). Confirm before applying.
+  references:
+    - "Regulation (EU) 2016/679 Art. 32"
+    - "AWS S3 User Guide — Default encryption"
+  blocker_at_tier: [team, scalable]
+  data_classes_affected: [email, name, phone, transaction]
+```
+
+### Example 3 — Retention policy documented but never enforced
+
+```yaml
+- id: DATA-016
+  severity: high
+  category: retention
+  title: "6-year audit-log retention documented; no scheduled deletion job"
+  location: "docs/privacy-policy.md; system-level"
+  description: |
+    The privacy policy states audit logs retained 6 years for tax +
+    compliance reasons, then deleted. The policy is a public
+    commitment to data subjects and supervisory authorities. In fact,
+    no scheduled deletion job exists — `audit_log` has rows dating to
+    2018 (oldest 7.5 years), ~112M rows, 180 GB. The mismatch is
+    itself a GDPR Art. 5(1)(e) finding (storage limitation). It's also
+    a supervisor-provokable question if a data subject requests
+    confirmation that their data has been deleted.
+  evidence:
+    - "docs/privacy-policy.md §7: 'We retain audit logs for 6 years.'"
+    - "SELECT MIN(created_at) FROM audit_log → 2018-04-11"
+  remediation:
+    plan_mode: |
+      1. Add a scheduled job (daily or weekly) that deletes / archives
+         rows beyond the documented window.
+      2. Chunked delete to avoid long locks on the table.
+      3. Log the deletion counts to the audit stream itself (deleted N
+         rows from window Y).
+      4. One-time backfill: delete pre-policy rows in a managed
+         migration with ops awareness.
+    edit_mode: |
+      Destructive. Requires explicit confirmation and legal sign-off
+      before first run — some categories may have overriding legal
+      retention (tax, fraud investigations).
+  references:
+    - "Regulation (EU) 2016/679 Art. 5(1)(e)"
+  related_findings: [COMP-018]
+  blocker_at_tier: [team, scalable]
+  data_classes_affected: [audit_log]
 ```
 
 ## Edit-mode remediation

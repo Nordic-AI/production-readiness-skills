@@ -1,6 +1,10 @@
 ---
 name: observability-audit
 description: Reviews logging, metrics, distributed tracing, error reporting, alerting, and operational runbooks. Checks that the system emits the right telemetry at the right granularity, that signals are actionable, and that on-call has what it needs. Use when the user asks about "observability", "logging", "metrics", "tracing", "monitoring", "alerting", invokes /observability-audit, or when the orchestrator delegates. Stack-agnostic, mode-aware, scope-tier-aware.
+license: Apache-2.0
+metadata:
+  version: 0.1.0
+  id_prefix: OBS
 ---
 
 # Observability Audit
@@ -201,6 +205,123 @@ Runbooks: <count discovered>
 
 Top 3 blind spots:
   1. ...
+```
+
+## Example findings
+
+### Example 1 — Unbounded cardinality on Prometheus label
+
+```yaml
+- id: OBS-002
+  severity: high
+  category: metrics
+  title: "http_requests_total uses user_id as a label — cardinality explosion"
+  location: "src/metrics/http.ts:14"
+  description: |
+    `http_requests_total` is defined with a `user_id` label alongside
+    `method` and `route`. With ~400k distinct users, the metric
+    produces ~400k × N_routes × N_methods active time series per
+    scrape — at the current rate of signup (~300/day), time series
+    count grows monotonically. Prometheus storage and alerting rule
+    evaluation cost scale linearly with this; the ingestion pipeline
+    has already shown p95 scrape latency rising 4x over the last
+    quarter, correlated with user growth. High cardinality is also
+    expensive on managed backends (Datadog, New Relic).
+  evidence:
+    - |
+      // src/metrics/http.ts:14
+      export const httpRequests = new Counter({
+        name: 'http_requests_total',
+        labelNames: ['method', 'route', 'status', 'user_id'],
+      });
+  remediation:
+    plan_mode: |
+      1. Remove `user_id` from Prometheus labels.
+      2. Per-user behavior belongs in logs or traces (or a separate
+         OLAP system), not metrics labels.
+      3. If per-tenant / per-region slicing is needed, use tenant-id
+         (bounded) or a coarse geographic bucket, not unbounded IDs.
+      4. Audit other metrics for similar unbounded labels.
+    edit_mode: |
+      Safe: drop the label. Adjust any dashboards / alerts filtering
+      on user_id in metrics (likely none — they were always noisy).
+  references:
+    - "Prometheus docs — 'Naming things: Don't use labels for cardinality'"
+  blocker_at_tier: [team, scalable]
+```
+
+### Example 2 — Production logging via console.log
+
+```yaml
+- id: OBS-008
+  severity: medium
+  category: logging
+  title: "31 files use console.log for production logging in src/"
+  location: "multiple"
+  description: |
+    A grep finds 31 call sites using `console.log` / `console.error` in
+    `src/`. These emit plaintext lines that can't be parsed as
+    structured records, carry no correlation ID, and mix with other
+    operational output. The observability story for any incident
+    involving those paths is: SSH into the pod, `grep -i error
+    /var/log/app`, hope the timestamp frames match. The project
+    already includes `pino` for structured logging in a few files;
+    the refactor has stalled.
+  evidence:
+    - "grep -rn 'console\\.' src | wc -l → 31"
+    - "src/services/payments.ts, src/jobs/*.ts most affected"
+  remediation:
+    plan_mode: |
+      1. Replace console.log with the existing `logger` (pino).
+      2. Ensure request context (requestId, userId-hash, tenantId) is
+         threaded into the logger via `logger.child({...})`.
+      3. Add an ESLint rule (`no-console`) with an allowlist for CLI
+         entry points only.
+    edit_mode: |
+      Safe. Script-assisted replacement; review before commit.
+  references:
+    - "Twelve-Factor App — XI. Logs"
+  blocker_at_tier: [team, scalable]
+```
+
+### Example 3 — Correlation ID not propagated across async boundary
+
+```yaml
+- id: OBS-015
+  severity: high
+  category: logging
+  title: "Queue consumers start fresh request IDs, breaking trace continuity"
+  location: "src/workers/email_consumer.ts:7"
+  description: |
+    HTTP requests generate an `X-Request-ID` and threading it into the
+    logger is handled by middleware. When the HTTP handler enqueues a
+    job to the email queue, the request ID isn't serialized into the
+    message body. The consumer starts a fresh UUID, making trace
+    continuity from "user action → email sent" impossible. Every
+    non-trivial incident (e.g. "why didn't user X get their receipt?")
+    requires a manual timestamp + user-id forensic join that takes
+    minutes per case.
+  evidence:
+    - |
+      // src/routes/orders.ts — enqueues without passing request-id
+      await queue.add('send-receipt', { orderId, userId });
+      // src/workers/email_consumer.ts:7 — generates fresh id
+      const requestId = uuid();
+  remediation:
+    plan_mode: |
+      1. Include request-id (and trace-context if OTel is in use) as a
+         message attribute when enqueuing.
+      2. In consumers, adopt the received request-id into the logger
+         context instead of minting a new one.
+      3. For OTel: use the propagation API to carry trace context into
+         the message and extract in the consumer (both BullMQ and AWS
+         SQS OTel instrumentations support this).
+    edit_mode: |
+      Safe. Touches all queue enqueue + consume sites (grep shows 8
+      call sites). Add a shared helper to avoid drift.
+  references:
+    - "OpenTelemetry — Messaging semantic conventions"
+  blocker_at_tier: [team, scalable]
 ```
 
 ## Edit-mode remediation
